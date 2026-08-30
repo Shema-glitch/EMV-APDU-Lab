@@ -3,11 +3,14 @@
     EMV APDU Lab V14 - PC/SC Smart Card Diagnostic Suite
 .DESCRIPTION
     Native PowerShell 5.1 & WinForms desktop diagnostic utility for PC/SC smart card readers.
-    Communicates via winscard.dll P/Invoke, features paced lazy-loading execution streams,
-    recursive BER-TLV parsing, direct console output routing, and 3D banner graphics.
+    Features P/Invoke winscard.dll bindings, encoding-safe 3D banner graphics, paced execution,
+    and unified console logging.
 .AUTHOR
     Shema-glitch (charmantshema112@gmail.com)
 #>
+
+# Force console output encoding to UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # Add WinForms and Drawing Assemblies
 Add-Type -AssemblyName System.Windows.Forms
@@ -53,7 +56,7 @@ if (-not ([System.Management.Automation.PSTypeName]'WinScard').Type) {
 }
 
 # ==========================================
-# 2. TERMINAL 3D BANNER RENDER ENGINE
+# 2. ENCODING-SAFE TERMINAL 3D BANNER RENDER
 # ==========================================
 function Write-3DBlockBanner {
     [CmdletBinding()]
@@ -70,6 +73,11 @@ function Write-3DBlockBanner {
     $originalFgColor = [Console]::ForegroundColor
     [Console]::CursorVisible = $false
 
+    # Unicode Character Mapping Constants
+    $cBlock = [char]0x2588  # Solid Full Block
+    $cLight = [char]0x2591  # Light Shade
+    $cMed   = [char]0x2592  # Medium Shade
+
     try {
         # Layer 1: Wireframe / Extrusion Layer (Offset: X+1, Y+1)
         [Console]::ForegroundColor = $StrokeColor
@@ -80,9 +88,8 @@ function Write-3DBlockBanner {
                 $char = $line[$j]
                 if ($char -ne ' ') {
                     $strokeChar = switch ($char) {
-                        '█' { '░' }
-                        '▓' { '▒' }
-                        default { '░' }
+                        $cBlock { $cLight }
+                        default { $cLight }
                     }
                     [Console]::SetCursorPosition($StartX + $j + 1, $currentY)
                     [Console]::Write($strokeChar)
@@ -113,16 +120,28 @@ function Write-3DBlockBanner {
     }
 }
 
+# Build Banner Strings via Encoding-Proof Character Replacement
+$rawTemplate = @(
+    "#######]###]   ###]##]   ##]    ######] ######] ######] ##]   ##]    ##]      #####] ######] ",
+    "##[====}####] ####|##|   ##|    ##[==##]##[==##]##[==##]##|   ##|    ##|     ##[==##]##[==##]",
+    "#####]  ##[####[##|##|   ##|    ######} ######} ##|  ##|##|   ##|    ##|     #######|######} ",
+    "##[==}  ##|{##[}##|##|   ##|    ##[==##]##[===  ##|  ##|##|   ##|    ##|     ##[==##]##[==##]",
+    "#######]##| {=} ##|{######}     ##|  ##|##|     ######} {######}     #######|##|  ##|######} ",
+    "{======} {=}     {=} {=====}     {=}  {=} {=====}  {=====}     {======} {=}  {=} {=====} "
+)
+
+$EMVBanner = foreach ($line in $rawTemplate) {
+    $line.Replace('#', [char]0x2588)`
+         .Replace('[', [char]0x2554)`
+         .Replace('=', [char]0x2550)`
+         .Replace(']', [char]0x2557)`
+         .Replace('|', [char]0x2551)`
+         .Replace('{', [char]0x255A)`
+         .Replace('}', [char]0x255D)
+}
+
 # Output Terminal Header
 Clear-Host
-$EMVBanner = @(
-    "███████╗███╗   ███╗██╗   ██╗    ██████╗ ██████╗ ██████╗ ██╗   ██╗    ██╗      █████╗ ██████╗ ",
-    "██╔════╝████╗ ████║██║   ██║    ██╔══██╗██╔══██╗██╔══██╗██║   ██║    ██║     ██╔══██╗██╔══██╗",
-    "█████╗  ██╔████╔██║██║   ██║    ██████╔╝██████╔╝██║  ██║██║   ██║    ██║     ███████║██████╔╝",
-    "██╔══╝  ██║╚██╔╝██║██║   ██║    ██╔══██╗██╔═══╝ ██║  ██║██║   ██║    ██║     ██╔══██║██╔══██╗",
-    "███████╗██║ ╚═╝ ██║╚██████╔╝    ██║  ██║██║     ██████╔╝╚██████╔╝    ███████╗██║  ██║██████╔╝",
-    "╚══════╝╚═╝     ╚═╝ ╚═════╝     ╚═╝  ╚═╝╚═╝     ╚═════╝  ╚═════╝     ╚══════╝╚═╝  ╚═╝╚═════╝ "
-)
 Write-3DBlockBanner -BannerLines $EMVBanner -StartX 2 -StartY 1 -FillColor Cyan -StrokeColor DarkGray -CharDelayMs 1
 
 # ==========================================
