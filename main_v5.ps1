@@ -1,14 +1,16 @@
 #requires -Version 5.1
 
 <#
-    EMV APDU LAB V12 - Enhanced 4-Layer Inspector & Diagnostic Suite
+    EMV APDU LAB V13 - Complete Automated Inspector & Diagnostic Suite
     ===========================================================================
-    - Native C# BER-TLV Recursive Tag/Length/Value Parser
-    - Automated GPO & Multi-SFI Record Sweeper (SFIs 1-10, Records 1-5)
-    - Extended AID Probing (Visa, MC, Maestro, Amex, UnionPay, Discover, JCB)
-    - Single-Click Timestamped Diagnostic Report Exporter
-    - Automatic Status Word Protocol Handling (61 XX / 6C XX)
-    - Zero External Dependencies (Native Win32 winscard.dll via C# / .NET)
+    - Fully compatible with C# 5.0 (.NET Framework default compilers)
+    - Automated EMV Sequence: SELECT -> GPO -> Multi-SFI Sweep -> Data Extract
+    - Automatic Tag Extractor: PAN, Cardholder Name, Expiration Date, Track 2
+    - Recursive BER-TLV Tree Parser & ASCII Hex Decoder
+    - Expanded AID Probing (Visa, MC, Amex, UnionPay, Discover, JCB, PSE/PPSE)
+    - Auto-Handling of Status Words: 61 XX (Get Response) & 6C XX (Re-issue Le)
+    - Single-Click Export to Timestamped Report Files
+    - Zero External Dependencies (Native winscard.dll via C# / .NET)
 #>
 
 $ErrorActionPreference = "Stop"
@@ -92,8 +94,8 @@ public class TLVNode
     {
         StringBuilder sb = new StringBuilder();
         string prefix = new string(' ', indent * 2);
-        string ascii = APDULabV12.DecodeAscii(Value);
-        sb.AppendLine(prefix + "[Tag " + Tag + "] (Len: " + Length + ") -> Hex: " + APDULabV12.Hex(Value) + " | ASCII: \"" + ascii + "\"");
+        string ascii = APDULabV13.DecodeAscii(Value);
+        sb.AppendLine(prefix + "[Tag " + Tag + "] (Len: " + Length + ") -> Hex: " + APDULabV13.Hex(Value) + " | ASCII: \"" + ascii + "\"");
         foreach (var child in Children)
         {
             sb.Append(child.FormatTree(indent + 1));
@@ -102,9 +104,107 @@ public class TLVNode
     }
 }
 
-public class APDULabV12
+public class EMVCardSummary
 {
-    // PC/SC CONSTANTS
+    public string PAN { get; set; }
+    public string ExpiryDate { get; set; }
+    public string CardholderName { get; set; }
+    public string Track2 { get; set; }
+    public string ServiceCode { get; set; }
+
+    public EMVCardSummary()
+    {
+        PAN = "N/A";
+        ExpiryDate = "N/A";
+        CardholderName = "N/A";
+        Track2 = "N/A";
+        ServiceCode = "N/A";
+    }
+
+    public static EMVCardSummary ExtractFromTLVNodes(List<TLVNode> nodes)
+    {
+        EMVCardSummary summary = new EMVCardSummary();
+        FindTagsRecursive(nodes, summary);
+        return summary;
+    }
+
+    private static void FindTagsRecursive(List<TLVNode> nodes, EMVCardSummary summary)
+    {
+        foreach (var node in nodes)
+        {
+            string hexVal = APDULabV13.Hex(node.Value).Replace(" ", "");
+
+            // Tag 57: Track 2 Equivalent Data
+            if (node.Tag.Equals("57", StringComparison.OrdinalIgnoreCase))
+            {
+                summary.Track2 = hexVal;
+                int dIndex = hexVal.IndexOf('D');
+                if (dIndex == -1) dIndex = hexVal.IndexOf('d');
+
+                if (dIndex > 0)
+                {
+                    summary.PAN = hexVal.Substring(0, dIndex);
+                    if (hexVal.Length >= dIndex + 5)
+                    {
+                        string expYYMM = hexVal.Substring(dIndex + 1, 4);
+                        summary.ExpiryDate = "20" + expYYMM.Substring(0, 2) + "/" + expYYMM.Substring(2, 2);
+                        if (hexVal.Length >= dIndex + 8)
+                        {
+                            summary.ServiceCode = hexVal.Substring(dIndex + 5, 3);
+                        }
+                    }
+                }
+            }
+            // Tag 5A: PAN
+            else if (node.Tag.Equals("5A", StringComparison.OrdinalIgnoreCase) && summary.PAN == "N/A")
+            {
+                summary.PAN = hexVal.TrimEnd('F', 'f');
+            }
+            // Tag 5F20: Cardholder Name
+            else if (node.Tag.Equals("5F20", StringComparison.OrdinalIgnoreCase))
+            {
+                summary.CardholderName = APDULabV13.DecodeAscii(node.Value).Trim();
+            }
+            // Tag 5F24: Application Expiration Date (YYMMDD)
+            else if (node.Tag.Equals("5F24", StringComparison.OrdinalIgnoreCase) && summary.ExpiryDate == "N/A")
+            {
+                if (hexVal.Length >= 4)
+                {
+                    summary.ExpiryDate = "20" + hexVal.Substring(0, 2) + "/" + hexVal.Substring(2, 2);
+                }
+            }
+
+            if (node.Children != null && node.Children.Count > 0)
+            {
+                FindTagsRecursive(node.Children, summary);
+            }
+        }
+    }
+
+    public string ToFormattedReport()
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine("============================================");
+        sb.AppendLine("         AUTOMATED CARD DATA SUMMARY        ");
+        sb.AppendLine("============================================");
+        sb.AppendLine("Cardholder Name : " + CardholderName);
+        sb.AppendLine("PAN / Card No.  : " + MaskPAN(PAN));
+        sb.AppendLine("Expiration Date : " + ExpiryDate);
+        sb.AppendLine("Service Code    : " + ServiceCode);
+        sb.AppendLine("Track 2 Payload : " + Track2);
+        sb.AppendLine("============================================");
+        return sb.ToString();
+    }
+
+    private string MaskPAN(string pan)
+    {
+        if (string.IsNullOrEmpty(pan) || pan.Length < 10) return pan;
+        return pan.Substring(0, 6) + new string('*', pan.Length - 10) + pan.Substring(pan.Length - 4);
+    }
+}
+
+public class APDULabV13
+{
     const uint SCARD_SCOPE_SYSTEM = 2;
     const uint SCARD_SHARE_EXCLUSIVE = 1;
     const uint SCARD_SHARE_SHARED = 2;
@@ -122,7 +222,6 @@ public class APDULabV12
         public uint cbPciLength;
     }
 
-    // P/INVOKE IMPORTS
     [DllImport("winscard.dll")]
     static extern int SCardEstablishContext(uint scope, IntPtr r1, IntPtr r2, out IntPtr context);
 
@@ -141,9 +240,6 @@ public class APDULabV12
     [DllImport("winscard.dll")]
     static extern int SCardDisconnect(IntPtr card, uint disposition);
 
-    [DllImport("winscard.dll")]
-    static extern int SCardReleaseContext(IntPtr context);
-
     class CardSession
     {
         public IntPtr Context = IntPtr.Zero;
@@ -158,10 +254,10 @@ public class APDULabV12
     static CardSession session = new CardSession();
     static Form form;
 
-    // UI Controls
     static ComboBox readerCombo;
     static Button connectButton;
     static Button disconnectButton;
+    static Button autoSeqButton;
     static Button inspectButton;
     static Button exportButton;
 
@@ -176,13 +272,11 @@ public class APDULabV12
     static RichTextBox layer4Text;
     static RichTextBox fullLogText;
 
-    // APDU Console Controls
     static ComboBox presetCombo;
     static TextBox apduInputText;
     static Button sendApduButton;
     static RichTextBox apduOutputText;
 
-    // HELPERS
     public static string Hex(byte[] data)
     {
         if (data == null || data.Length == 0) return "";
@@ -265,7 +359,6 @@ public class APDULabV12
         fullLogText.ScrollToCaret();
     }
 
-    // HARDWARE ENGINE
     static void EstablishContext()
     {
         int rc = SCardEstablishContext(SCARD_SCOPE_SYSTEM, IntPtr.Zero, IntPtr.Zero, out session.Context);
@@ -335,7 +428,6 @@ public class APDULabV12
         session.Reader = readerCombo.SelectedItem.ToString();
         Log("Connecting to: " + session.Reader);
 
-        // Multi-stage connection logic
         int rc = SCardConnect(session.Context, session.Reader, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, out session.Card, out session.Protocol);
         if (rc != SCARD_S_SUCCESS) rc = SCardConnect(session.Context, session.Reader, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0, out session.Card, out session.Protocol);
         if (rc != SCARD_S_SUCCESS) rc = SCardConnect(session.Context, session.Reader, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T1, out session.Card, out session.Protocol);
@@ -356,6 +448,7 @@ public class APDULabV12
 
         connectButton.Enabled = false;
         disconnectButton.Enabled = true;
+        autoSeqButton.Enabled = true;
         inspectButton.Enabled = true;
         exportButton.Enabled = true;
         sendApduButton.Enabled = true;
@@ -378,6 +471,7 @@ public class APDULabV12
             connectionLabel.ForeColor = Color.DarkRed;
             connectButton.Enabled = true;
             disconnectButton.Enabled = false;
+            autoSeqButton.Enabled = false;
             inspectButton.Enabled = false;
             exportButton.Enabled = false;
             sendApduButton.Enabled = false;
@@ -444,6 +538,98 @@ public class APDULabV12
         return result;
     }
 
+    // AUTOMATED EMV SEQUENCE PIPELINE
+    static void RunFullAutoSequence()
+    {
+        layer4Text.Clear();
+        Log("Executing Full EMV Sequence Pipeline...");
+
+        List<TLVNode> collectedNodes = new List<TLVNode>();
+
+        // STEP 1: Application Selection
+        string[] aids = new string[] {
+            "00A4040007A000000003101000", // Visa
+            "00A4040007A000000004101000", // Mastercard
+            "00A404000E315041592E5359532E444446303100", // Contact PSE
+            "00A4040007A000000004306000", // Maestro
+            "00A4040007A000000025010100"  // Amex
+        };
+
+        byte[] activeFci = null;
+        string activeAidUsed = "";
+
+        foreach (string aid in aids)
+        {
+            try
+            {
+                byte[] resp = SendApduRaw(StringToByteArray(aid));
+                if (resp.Length >= 2 && resp[resp.Length - 2] == 0x90 && resp[resp.Length - 1] == 0x00)
+                {
+                    activeFci = resp;
+                    activeAidUsed = aid;
+                    break;
+                }
+            }
+            catch { }
+        }
+
+        if (activeFci == null)
+        {
+            MessageBox.Show("Unable to select an active payment application on this card.", "Sequence Halted", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        collectedNodes.AddRange(TLVNode.Parse(activeFci));
+        layer4Text.AppendText("[1/3] SELECT APPLICATION -> SUCCESS\n");
+
+        // STEP 2: Processing Initialization (GPO)
+        byte[] gpoResp = null;
+        try
+        {
+            gpoResp = SendApduRaw(StringToByteArray("80 A8 00 00 04 83 02 06 46 00"));
+        }
+        catch
+        {
+            try { gpoResp = SendApduRaw(StringToByteArray("80 A8 00 00 02 83 00 00")); } catch { }
+        }
+
+        if (gpoResp != null) collectedNodes.AddRange(TLVNode.Parse(gpoResp));
+        layer4Text.AppendText("[2/3] GET PROCESSING OPTIONS (GPO) -> COMPLETED\n");
+
+        // STEP 3: Multi-SFI Record Sweep
+        layer4Text.AppendText("[3/3] READING CARD RECORDS & PARSING TLV...\n\n");
+        for (byte sfi = 1; sfi <= 10; sfi++)
+        {
+            for (byte rec = 1; rec <= 5; rec++)
+            {
+                byte p2 = (byte)((sfi << 3) | 4);
+                byte[] readCmd = new byte[] { 0x00, 0xB2, rec, p2, 0x00 };
+                try
+                {
+                    byte[] recResp = SendApduRaw(readCmd);
+                    if (recResp.Length > 2 && recResp[recResp.Length - 2] == 0x90 && recResp[recResp.Length - 1] == 0x00)
+                    {
+                        collectedNodes.AddRange(TLVNode.Parse(recResp));
+                    }
+                }
+                catch { }
+            }
+        }
+
+        // STEP 4: Format Extracted Card Summary
+        EMVCardSummary summary = EMVCardSummary.ExtractFromTLVNodes(collectedNodes);
+        layer4Text.AppendText(summary.ToFormattedReport() + "\n\n");
+
+        layer4Text.AppendText("--- FULL RECURSIVE BER-TLV TREE ---\n");
+        foreach (var node in collectedNodes)
+        {
+            layer4Text.AppendText(node.FormatTree(1));
+        }
+
+        mainTabControl.SelectedIndex = 0;
+        Log("Full EMV Automated Sequence completed successfully.");
+    }
+
     // 4-LAYER DIAGNOSTIC ENGINE
     static void RunFullInspection()
     {
@@ -467,9 +653,9 @@ public class APDULabV12
             layer2Text.AppendText("ATR Header Byte : 0x" + session.Atr[0].ToString("X2") + " (" + (session.Atr[0] == 0x3B ? "Direct Convention" : "Inverse Convention") + ")\n");
             layer2Text.AppendText("ATR Length      : " + session.Atr.Length + " bytes\n");
         }
-        layer2Text.AppendText("Transport Status: PASS (Card initialized without reset flags)\n\n");
+        layer2Text.AppendText("Transport Status: PASS\n\n");
 
-        // LAYER 3 & 4: EXPANDED AID PROBING & RECORD SWEEPING
+        // LAYER 3 & 4: AID DISCOVERY
         layer3Text.AppendText("=== LAYER 3: EXPANDED AID DISCOVERY ===\n");
         layer4Text.AppendText("=== LAYER 4: RECORD & BER-TLV INSPECTION ===\n");
 
@@ -486,8 +672,6 @@ public class APDULabV12
             { "Discover / Diners", "00A4040007A000000152301000" },
             { "JCB", "00A4040007A000000065101000" }
         };
-
-        string activeAppFound = "";
 
         foreach (var entry in targets)
         {
@@ -508,7 +692,6 @@ public class APDULabV12
 
                     if (sw1 == 0x90 && sw2 == 0x00)
                     {
-                        activeAppFound = entry.Key;
                         layer4Text.AppendText("Active App Selected: " + entry.Key + "\n");
                         layer4Text.AppendText("Raw FCI Response   : " + Hex(response) + "\n");
                         layer4Text.AppendText("--- BER-TLV FCI Structure ---\n");
@@ -528,54 +711,10 @@ public class APDULabV12
             }
         }
 
-        // AUTOMATED SFI RECORD SWEEPER
-        if (!string.IsNullOrEmpty(activeAppFound))
-        {
-            layer4Text.AppendText("--> AUTOMATED RECORD SWEEPER (SFIs 1-10, Records 1-5)\n");
-            
-            // Execute GPO with Rwanda Country Code (06 46)
-            try
-            {
-                byte[] gpoCmd = StringToByteArray("80 A8 00 00 04 83 02 06 46 00");
-                byte[] gpoResp = SendApduRaw(gpoCmd);
-                layer4Text.AppendText("GPO Response (06 46): " + Hex(gpoResp) + "\n");
-                var gpoNodes = TLVNode.Parse(gpoResp);
-                foreach (var node in gpoNodes) layer4Text.AppendText(node.FormatTree(1));
-                layer4Text.AppendText("\n");
-            }
-            catch { /* Proceed to record sweep */ }
-
-            for (byte sfi = 1; sfi <= 10; sfi++)
-            {
-                for (byte rec = 1; rec <= 5; rec++)
-                {
-                    byte p2 = (byte)((sfi << 3) | 4);
-                    byte[] readCmd = new byte[] { 0x00, 0xB2, rec, p2, 0x00 };
-
-                    try
-                    {
-                        byte[] recResp = SendApduRaw(readCmd);
-                        if (recResp.Length > 2 && recResp[recResp.Length - 2] == 0x90 && recResp[recResp.Length - 1] == 0x00)
-                        {
-                            layer4Text.AppendText(string.Format("[Found] SFI {0:D2} Rec {1:D2} -> Raw: {2}\n", sfi, rec, Hex(recResp)));
-                            var recNodes = TLVNode.Parse(recResp);
-                            foreach (var node in recNodes)
-                            {
-                                layer4Text.AppendText(node.FormatTree(1));
-                            }
-                            layer4Text.AppendText("\n");
-                        }
-                    }
-                    catch { /* Ignore non-existent records */ }
-                }
-            }
-        }
-
         mainTabControl.SelectedIndex = 0;
         Log("Completed 4-Layer Inspection Sweep.");
     }
 
-    // EXPORT REPORT HANDLER
     static void ExportReport()
     {
         using (SaveFileDialog sfd = new SaveFileDialog())
@@ -588,7 +727,7 @@ public class APDULabV12
                 {
                     StringBuilder sb = new StringBuilder();
                     sb.AppendLine("==================================================================");
-                    sb.AppendLine("              EMV APDU LAB V12 - DIAGNOSTIC REPORT               ");
+                    sb.AppendLine("              EMV APDU LAB V13 - DIAGNOSTIC REPORT               ");
                     sb.AppendLine("==================================================================");
                     sb.AppendLine("Generated On : " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                     sb.AppendLine("Reader Used  : " + session.Reader);
@@ -616,7 +755,6 @@ public class APDULabV12
         }
     }
 
-    // APDU CONSOLE HANDLER
     static void ExecuteManualApdu()
     {
         string input = apduInputText.Text.Trim();
@@ -657,41 +795,37 @@ public class APDULabV12
         }
     }
 
-    // UI DASHBOARD BUILDER
     static void BuildUi()
     {
         form = new Form
         {
-            Text = "EMV APDU Lab V12 - Enhanced 4-Layer Inspector & Diagnostic Suite",
-            Width = 1180,
+            Text = "EMV APDU Lab V13 - Complete Automated Inspector & Diagnostic Suite",
+            Width = 1200,
             Height = 780,
             StartPosition = FormStartPosition.CenterScreen,
             Font = new Font("Segoe UI", 9f)
         };
 
-        // Top Control Panel
         Panel top = new Panel { Dock = DockStyle.Top, Height = 55, BackColor = Color.FromArgb(240, 240, 243) };
-        readerCombo = new ComboBox { Left = 12, Top = 14, Width = 310, DropDownStyle = ComboBoxStyle.DropDownList };
-        Button refreshBtn = new Button { Text = "Refresh", Left = 330, Top = 12, Width = 85, Height = 28 };
-        connectButton = new Button { Text = "Connect", Left = 422, Top = 12, Width = 85, Height = 28 };
-        disconnectButton = new Button { Text = "Disconnect", Left = 514, Top = 12, Width = 85, Height = 28, Enabled = false };
-        inspectButton = new Button { Text = "4-Layer Inspect", Left = 606, Top = 12, Width = 130, Height = 28, Enabled = false, BackColor = Color.LightSkyBlue };
-        exportButton = new Button { Text = "Export Report", Left = 742, Top = 12, Width = 120, Height = 28, Enabled = false, BackColor = Color.LightGreen };
+        readerCombo = new ComboBox { Left = 12, Top = 14, Width = 280, DropDownStyle = ComboBoxStyle.DropDownList };
+        Button refreshBtn = new Button { Text = "Refresh", Left = 298, Top = 12, Width = 75, Height = 28 };
+        connectButton = new Button { Text = "Connect", Left = 378, Top = 12, Width = 80, Height = 28 };
+        disconnectButton = new Button { Text = "Disconnect", Left = 463, Top = 12, Width = 85, Height = 28, Enabled = false };
+        autoSeqButton = new Button { Text = "Run Auto Sequence", Left = 553, Top = 12, Width = 140, Height = 28, Enabled = false, BackColor = Color.LightGreen };
+        inspectButton = new Button { Text = "4-Layer Inspect", Left = 698, Top = 12, Width = 120, Height = 28, Enabled = false, BackColor = Color.LightSkyBlue };
+        exportButton = new Button { Text = "Export Report", Left = 823, Top = 12, Width = 110, Height = 28, Enabled = false, BackColor = Color.LightGray };
 
-        top.Controls.AddRange(new Control[] { readerCombo, refreshBtn, connectButton, disconnectButton, inspectButton, exportButton });
+        top.Controls.AddRange(new Control[] { readerCombo, refreshBtn, connectButton, disconnectButton, autoSeqButton, inspectButton, exportButton });
 
-        // Info Header Banner
         Panel info = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Color.White };
         connectionLabel = new Label { Text = "o DISCONNECTED", Left = 12, Top = 14, AutoSize = true, ForeColor = Color.DarkRed, Font = new Font("Segoe UI", 10, FontStyle.Bold) };
         protocolLabel = new Label { Text = "Protocol: -", Left = 220, Top = 15, AutoSize = true, Font = new Font("Segoe UI", 9.5f) };
         atrLabel = new Label { Text = "ATR: -", Left = 400, Top = 15, AutoSize = true, Font = new Font("Consolas", 9.5f) };
         info.Controls.AddRange(new Control[] { connectionLabel, protocolLabel, atrLabel });
 
-        // Main Tab Control
         mainTabControl = new TabControl { Dock = DockStyle.Fill };
 
-        // Tab 1: 4-Layer Inspector View
-        TabPage tabLayers = new TabPage { Text = "4-Layer Inspector" };
+        TabPage tabLayers = new TabPage { Text = "4-Layer & Sequence Output" };
         TableLayoutPanel layerLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
         layerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
         layerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
@@ -709,8 +843,7 @@ public class APDULabV12
         layerLayout.Controls.Add(layer4Text, 1, 1);
         tabLayers.Controls.Add(layerLayout);
 
-        // Tab 2: Manual APDU Lab Console
-        TabPage tabApdu = new TabPage { Text = "APDU Lab & Console" };
+        TabPage tabApdu = new TabPage { Text = "Manual APDU Console" };
         Panel apduTopPanel = new Panel { Dock = DockStyle.Top, Height = 50 };
         
         Label presetLbl = new Label { Text = "Presets:", Left = 10, Top = 15, AutoSize = true };
@@ -723,8 +856,9 @@ public class APDULabV12
             "SELECT Mastercard AID",
             "SELECT Maestro AID",
             "GPO (Rwanda Country Code 06 46)",
-            "READ SFI 1 Rec 2 (Name Field)",
-            "READ SFI 3 Rec 1 (PAN/Expiry)"
+            "READ SFI 1 Rec 1",
+            "READ SFI 1 Rec 2",
+            "READ SFI 2 Rec 1"
         });
 
         apduInputText = new TextBox { Left = 355, Top = 12, Width = 380, Font = new Font("Consolas", 10) };
@@ -736,7 +870,6 @@ public class APDULabV12
         tabApdu.Controls.Add(apduOutputText);
         tabApdu.Controls.Add(apduTopPanel);
 
-        // Tab 3: System Log
         TabPage tabLog = new TabPage { Text = "Diagnostic Trace Log" };
         fullLogText = new RichTextBox { Dock = DockStyle.Fill, Font = new Font("Consolas", 9), ReadOnly = true, BackColor = Color.FromArgb(28, 28, 28), ForeColor = Color.LightGray };
         tabLog.Controls.Add(fullLogText);
@@ -749,13 +882,16 @@ public class APDULabV12
         form.Controls.Add(info);
         form.Controls.Add(top);
 
-        // Event Hookups
         refreshBtn.Click += (s, e) => RefreshReaders();
         connectButton.Click += (s, e) => {
             try { Connect(); }
             catch (Exception ex) { MessageBox.Show(ex.Message, "Connection Failure", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         };
         disconnectButton.Click += (s, e) => Disconnect(true);
+        autoSeqButton.Click += (s, e) => {
+            try { RunFullAutoSequence(); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Sequence Error", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        };
         inspectButton.Click += (s, e) => {
             try { RunFullInspection(); }
             catch (Exception ex) { MessageBox.Show(ex.Message, "Inspection Error", MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -772,8 +908,9 @@ public class APDULabV12
                 case 4: apduInputText.Text = "00 A4 04 00 07 A0 00 00 00 04 10 10 00"; break;
                 case 5: apduInputText.Text = "00 A4 04 00 07 A0 00 00 00 04 30 60 00"; break;
                 case 6: apduInputText.Text = "80 A8 00 00 04 83 02 06 46 00"; break;
-                case 7: apduInputText.Text = "00 B2 02 0C 4F"; break;
-                case 8: apduInputText.Text = "00 B2 01 1C 47"; break;
+                case 7: apduInputText.Text = "00 B2 01 0C 00"; break;
+                case 8: apduInputText.Text = "00 B2 02 0C 00"; break;
+                case 9: apduInputText.Text = "00 B2 01 14 00"; break;
             }
         };
 
@@ -799,8 +936,8 @@ try {
             "System.Drawing.dll",
             "System.Windows.Forms.dll"
 
-    [APDULabV12]::Main()
+    [APDULabV13]::Main()
 }
 catch {
-    Write-Host "Startup error: " $_.Exception.Message -ForegroundColor Red
+    Write-Host "Startup compilation error: " $_.Exception.Message -ForegroundColor Red
 }
